@@ -33,7 +33,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22' # 建议使用 LTS 版本
+          node-version: '20' # 建议使用 LTS 版本
           cache: 'npm'
           
 
@@ -42,14 +42,15 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      # 步骤 5: 动态创建 Hono 入口文件和 Wrangler 配置文件
+       # 关键修复 2: 在部署前显式安装 hono 依赖
+      - name: Install Hono dependency
+        run: pnpm add hono
+
+      # 步骤保持不变: 创建入口文件和配置文件
       - name: Create Worker entry and config files
         run: |
-          # 创建 src 目录
           mkdir -p src
-
-          # 写入 src/index.ts Hono 适配器代码
-          # 这个适配器将 Express 请求转换为 Cloudflare Workers 兼容的格式
+          # 写入 Hono 适配器代码 (与之前相同)
           cat > src/index.ts << 'EOF'
           import { Hono } from 'hono';
           import { cors } from 'hono/cors';
@@ -110,7 +111,6 @@ jobs:
               const module = (modules as any)[path];
               if (module.default) {
                   const routePath = '/' + path.split('/').pop()?.replace('.js', '').replace(/_/g, '/');
-                  console.log(`Registering route: ${routePath}`);
                   app.all(routePath, (c) => expressAdapter(module, c));
               }
           }
@@ -119,18 +119,23 @@ jobs:
           export default app;
           EOF
 
-          # 写入 wrangler.toml 配置文件
-          # 注意：这里的 name 将使用 GitHub Secrets 中的 WORKER_NAME
+          # 写入 wrangler.toml，移除了 build.pre_commands
           cat > wrangler.toml << EOF
           name = "${{ secrets.WORKER_NAME }}"
           main = "src/index.ts"
           compatibility_date = "2023-12-01"
           compatibility_flags = ["nodejs_compat"]
-
-          # 安装 Hono 依赖，因为原项目没有它
-          [[build.pre_commands]]
-          command = "pnpm add hono"
           EOF
+
+      # 新增调试步骤: 打印文件和配置，方便排查
+      - name: Display final file structure and config
+        run: |
+          echo "--- File structure ---"
+          ls -R
+          echo "--- wrangler.toml content ---"
+          cat wrangler.toml
+          echo "-------------------------"
+
 
       # 步骤 6: 部署到 Cloudflare Workers
       - name: Deploy to Cloudflare Workers
