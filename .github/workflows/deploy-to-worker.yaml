@@ -33,16 +33,14 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18' # 建议使用 LTS 版本
-          cache: 'pnpm'
+          node-version: '22' # 建议使用 LTS 版本
+          cache: 'npm'
           
-      # 新增步骤：在安装前先生成锁文件
-      - name: Generate lock file
-        run: pnpm install --lockfile-only
+
       
       # 步骤 4: 安装项目依赖
       - name: Install dependencies
-        run: pnpm install
+        run: npm install
 
       # 步骤 5: 动态创建 Hono 入口文件和 Wrangler 配置文件
       - name: Create Worker entry and config files
