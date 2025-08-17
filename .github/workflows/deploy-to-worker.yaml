@@ -8,6 +8,7 @@ on:
     branches:
       - main
       - master
+      - tym2008-CF_Worker
   workflow_dispatch:
 
 jobs:
