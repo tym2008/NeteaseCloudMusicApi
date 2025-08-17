@@ -35,7 +35,11 @@ jobs:
         with:
           node-version: '18' # 建议使用 LTS 版本
           cache: 'pnpm'
-
+          
+      # 新增步骤：在安装前先生成锁文件
+      - name: Generate lock file
+        run: pnpm install --lockfile-only
+      
       # 步骤 4: 安装项目依赖
       - name: Install dependencies
         run: pnpm install
