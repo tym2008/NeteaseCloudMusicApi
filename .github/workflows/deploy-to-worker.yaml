@@ -1,0 +1,138 @@
+# .github/workflows/deploy-to-cf-workers.yml
+
+name: Deploy to Cloudflare Workers
+
+# 触发器：在 push 到 main 或 master 分支时，或手动触发时运行
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy
+    permissions:
+      contents: read # 允许 Action 读取仓库内容
+
+    steps:
+      # 步骤 1: 检出你的仓库代码
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 步骤 2: 设置 pnpm 包管理器
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8 # 或者你希望使用的 pnpm 版本
+
+      # 步骤 3: 设置 Node.js 环境
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18' # 建议使用 LTS 版本
+          cache: 'pnpm'
+
+      # 步骤 4: 安装项目依赖
+      - name: Install dependencies
+        run: pnpm install
+
+      # 步骤 5: 动态创建 Hono 入口文件和 Wrangler 配置文件
+      - name: Create Worker entry and config files
+        run: |
+          # 创建 src 目录
+          mkdir -p src
+
+          # 写入 src/index.ts Hono 适配器代码
+          # 这个适配器将 Express 请求转换为 Cloudflare Workers 兼容的格式
+          cat > src/index.ts << 'EOF'
+          import { Hono } from 'hono';
+          import { cors } from 'hono/cors';
+          import { logger } from 'hono/logger';
+          import type { Context } from 'hono';
+
+          const modules = import.meta.glob('../module/*.js', { eager: true });
+          const app = new Hono();
+
+          app.use('*', logger());
+          app.use('*', cors());
+
+          async function expressAdapter(module: any, c: Context) {
+              const url = new URL(c.req.url);
+              const req = {
+                  query: Object.fromEntries(url.searchParams),
+                  body: c.req.header('Content-Type')?.includes('json') ? await c.req.json() : {},
+                  cookies: c.req.cookie(),
+                  headers: c.req.header(),
+                  method: c.req.method,
+                  path: url.pathname,
+                  get: (field: string) => c.req.header(field),
+              };
+
+              let responseBody: any = '';
+              let responseStatus = 200;
+              const responseHeaders = new Headers({ 'Content-Type': 'application/json; charset=utf-8' });
+
+              const res = {
+                  status: (code: number) => { responseStatus = code; return res; },
+                  send: (body: any) => { responseBody = body; },
+                  set: (field: string, val: any) => {
+                      if (field.toLowerCase() === 'set-cookie' && Array.isArray(val)) {
+                          val.forEach(cookie => responseHeaders.append('Set-Cookie', cookie));
+                      } else {
+                          responseHeaders.set(field, val as string);
+                      }
+                  },
+                  json: (body: any) => {
+                      responseHeaders.set('Content-Type', 'application/json; charset=utf-8');
+                      responseBody = JSON.stringify(body);
+                  },
+              };
+
+              await module.default(req, res);
+              
+              if (typeof responseBody === 'object' && responseBody !== null) {
+                  responseBody = JSON.stringify(responseBody);
+              }
+
+              return new Response(responseBody, {
+                  status: responseStatus,
+                  headers: responseHeaders,
+              });
+          }
+
+          for (const path in modules) {
+              const module = (modules as any)[path];
+              if (module.default) {
+                  const routePath = '/' + path.split('/').pop()?.replace('.js', '').replace(/_/g, '/');
+                  console.log(`Registering route: ${routePath}`);
+                  app.all(routePath, (c) => expressAdapter(module, c));
+              }
+          }
+
+          app.get('/', (c) => c.text('NeteaseCloudMusicApi is running on Cloudflare Workers via GitHub Actions!'));
+          export default app;
+          EOF
+
+          # 写入 wrangler.toml 配置文件
+          # 注意：这里的 name 将使用 GitHub Secrets 中的 WORKER_NAME
+          cat > wrangler.toml << EOF
+          name = "${{ secrets.WORKER_NAME }}"
+          main = "src/index.ts"
+          compatibility_date = "2023-12-01"
+          compatibility_flags = ["nodejs_compat"]
+
+          # 安装 Hono 依赖，因为原项目没有它
+          [[build.pre_commands]]
+          command = "pnpm add hono"
+          EOF
+
+      # 步骤 6: 部署到 Cloudflare Workers
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # wrangler-action 会自动读取 wrangler.toml 文件进行部署
