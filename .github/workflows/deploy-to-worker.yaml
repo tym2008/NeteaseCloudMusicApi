@@ -32,24 +32,21 @@ jobs:
           npm install
           npm install hono @cloudflare/workers-types wrangler typescript
 
-      # 关键修复: 在构建时动态生成路由，而不是使用 import.meta.glob
       - name: Create Worker entry and config files
         run: |
           mkdir -p src
 
-          # 1. 写入文件的静态上半部分
+          # 写入文件的静态上半部分
           cat > src/index.ts << 'EOF'
           import { Hono } from 'hono';
           import { cors } from 'hono/cors';
           import { logger } from 'hono/logger';
           import type { Context } from 'hono';
 
-          // Hono App 初始化和中间件
           const app = new Hono();
           app.use('*', logger());
           app.use('*', cors());
 
-          // Express 适配器 (保持不变)
           async function expressAdapter(module: any, c: Context) {
               const url = new URL(c.req.url);
               const req = {
@@ -86,33 +83,27 @@ jobs:
               }
               return new Response(responseBody, { status: responseStatus, headers: responseHeaders });
           }
-
-          // --- 动态路由生成开始 ---
           EOF
 
-          # 2. 使用 shell 循环动态生成 import 和路由注册
+          # 动态生成 import 和路由注册
           for file in module/*.js; do
-            # 从文件名 'module/login_cellphone.js' 中提取 'login_cellphone'
+            # 修正 2: 排除不兼容的模块
+            if [[ "$file" == "module/register_anonimous.js" ]]; then
+              echo "Skipping incompatible module: $file"
+              continue
+            fi
+            
             filename=$(basename "$file" .js)
-            # 创建一个合法的 JS 变量名，如 'module_login_cellphone'
             identifier="module_${filename}"
-            # 创建路由路径，如 '/login/cellphone'
             routePath="/${filename//_//}"
 
-            # 追加 import 语句到 src/index.ts
             echo "import ${identifier} from '../${file}';" >> src/index.ts
-            # 追加路由注册语句到 src/index.ts
             echo "app.on(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], '${routePath}', (c) => expressAdapter(${identifier}.default, c));" >> src/index.ts
           done
 
-          # 3. 写入文件的静态下半部分
+          # 写入文件的静态下半部分
           cat >> src/index.ts << 'EOF'
-          // --- 动态路由生成结束 ---
-
-          // 添加根路由作为健康检查
           app.get('/', (c) => c.text('NeteaseCloudMusicApi is running on Cloudflare Workers!'));
-          
-          // 导出 Hono app
           export default {
             fetch: app.fetch,
           };
@@ -122,8 +113,16 @@ jobs:
           cat > wrangler.toml << EOF
           name = "${{ secrets.WORKER_NAME }}"
           main = "src/index.ts"
-          compatibility_date = "2024-02-28"
+          # 修正 1: 使用最新的 compatibility_date 来启用更好的 Node.js 兼容性模式
+          compatibility_date = "2024-03-20" 
           compatibility_flags = ["nodejs_compat"]
+          
+          # 告诉 Wrangler 在打包时如何处理 Node.js 内置模块
+          [build]
+          command = "true" # 我们自己生成文件，不需要 build 命令
+          
+          [nodejs_compat_v2]
+          enable = true
           EOF
 
       - name: Display final file structure and config
