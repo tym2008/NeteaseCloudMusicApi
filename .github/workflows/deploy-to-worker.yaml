@@ -1,6 +1,6 @@
 # .github/workflows/deploy-to-cf-workers.yml
 
-name: Deploy NeteaseCloudMusicApi to Cloudflare Workers
+name: Deploy NeteaseCloudMusicApi to Cloudflare Workers (using npm)
 
 # 触发器：在 push 到指定分支时，或手动触发时运行
 on:
@@ -23,29 +23,23 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 步骤 2: 设置 pnpm 包管理器 (高效、快速)
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v2
-        with:
-          version: 8
-
-      # 步骤 3: 设置 Node.js 环境，并为 pnpm 配置缓存
+      # 步骤 2: 设置 Node.js 环境，并为 npm 配置缓存
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20' # 建议使用 LTS 版本
-          cache: 'pnpm'
+          cache: 'npm' # <--- 改动 1: 将缓存策略设置为 'npm'
 
-      # 步骤 4: 安装项目自身依赖和部署所需的额外依赖
+      # 步骤 3: 安装项目自身依赖和部署所需的额外依赖
       - name: Install Dependencies
         run: |
-          # 安装 NeteaseCloudMusicApi 项目原有的依赖
-          pnpm install
+          # 安装 NeteaseCloudMusicApi 项目原有的依赖 (来自 package.json)
+          npm install
           # 为我们的 Worker 适配层安装额外的依赖
-          pnpm add hono @cloudflare/workers-types wrangler typescript
+          npm install hono @cloudflare/workers-types wrangler typescript # <--- 改动 2: 使用 npm install 安装
 
-      # 步骤 5: 创建 Cloudflare Worker 的入口文件和配置文件
-      # 这是整个流程的核心，它创建了一个适配层
+      # 步骤 4: 创建 Cloudflare Worker 的入口文件和配置文件
+      # 这一步与包管理器无关，内容保持不变
       - name: Create Worker entry and config files
         run: |
           mkdir -p src
@@ -148,7 +142,7 @@ jobs:
           compatibility_flags = ["nodejs_compat"]
           EOF
 
-      # 步骤 6 (可选但推荐): 打印最终文件结构和配置，方便调试
+      # 步骤 5 (可选但推荐): 打印最终文件结构和配置，方便调试
       - name: Display final file structure and config
         run: |
           echo "--- File structure ---"
@@ -157,7 +151,7 @@ jobs:
           cat wrangler.toml
           echo "-------------------------"
 
-      # 步骤 7: 部署到 Cloudflare Workers
+      # 步骤 6: 部署到 Cloudflare Workers
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:
