@@ -2,13 +2,12 @@
 
 name: Deploy NeteaseCloudMusicApi to Cloudflare Workers (using npm)
 
-# 触发器：在 push 到指定分支时，或手动触发时运行
 on:
   push:
     branches:
       - main
       - master
-      - tym2008-CF_Worker # 你可以自定义分支名
+      - tym2008-CF_Worker
   workflow_dispatch:
 
 jobs:
@@ -16,54 +15,43 @@ jobs:
     runs-on: ubuntu-latest
     name: Deploy
     permissions:
-      contents: read # 允许 Action 读取仓库内容
+      contents: read
 
     steps:
-      # 步骤 1: 检出 NeteaseCloudMusicApi 的仓库代码
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 步骤 2: 设置 Node.js 环境，并为 npm 配置缓存
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20' # 建议使用 LTS 版本
-          cache: 'npm' # <--- 改动 1: 将缓存策略设置为 'npm'
+          node-version: '20'
+          cache: 'npm'
 
-      # 步骤 3: 安装项目自身依赖和部署所需的额外依赖
       - name: Install Dependencies
         run: |
-          # 安装 NeteaseCloudMusicApi 项目原有的依赖 (来自 package.json)
           npm install
-          # 为我们的 Worker 适配层安装额外的依赖
-          npm install hono @cloudflare/workers-types wrangler typescript # <--- 改动 2: 使用 npm install 安装
+          npm install hono @cloudflare/workers-types wrangler typescript
 
-      # 步骤 4: 创建 Cloudflare Worker 的入口文件和配置文件
-      # 这一步与包管理器无关，内容保持不变
+      # 关键修复: 在构建时动态生成路由，而不是使用 import.meta.glob
       - name: Create Worker entry and config files
         run: |
           mkdir -p src
 
-          # 写入 Hono 适配器代码 (src/index.ts)，这是 Worker 的入口
+          # 1. 写入文件的静态上半部分
           cat > src/index.ts << 'EOF'
           import { Hono } from 'hono';
           import { cors } from 'hono/cors';
           import { logger } from 'hono/logger';
           import type { Context } from 'hono';
 
-          // 动态导入 NeteaseCloudMusicApi 项目的所有 API 模块
-          const modules = import.meta.glob('../module/*.js', { eager: true });
+          // Hono App 初始化和中间件
           const app = new Hono();
-
-          // 添加日志和 CORS 中间件
           app.use('*', logger());
           app.use('*', cors());
 
-          // “Express 转 Hono” 适配器函数
+          // Express 适配器 (保持不变)
           async function expressAdapter(module: any, c: Context) {
               const url = new URL(c.req.url);
-
-              // 1. 模拟 Express 的 `req` 对象
               const req = {
                   query: Object.fromEntries(url.searchParams),
                   body: c.req.header('Content-Type')?.includes('json') ? await c.req.json() : {},
@@ -73,17 +61,13 @@ jobs:
                   path: url.pathname,
                   get: (field: string) => c.req.header(field),
               };
-
               let responseBody: any = '';
               let responseStatus = 200;
               const responseHeaders = new Headers({ 'Content-Type': 'application/json; charset=utf-8' });
-
-              // 2. 模拟 Express 的 `res` 对象，它会捕获模块的输出
               const res = {
                   status: (code: number) => { responseStatus = code; return res; },
                   send: (body: any) => { responseBody = body; },
                   set: (field: string, val: any) => {
-                      // 特别处理 Set-Cookie，因为它可能是一个数组
                       if (field.toLowerCase() === 'set-cookie' && Array.isArray(val)) {
                           val.forEach(cookie => responseHeaders.append('Set-Cookie', cookie));
                       } else {
@@ -95,66 +79,63 @@ jobs:
                       responseBody = JSON.stringify(body);
                   },
               };
-
-              // 3. 执行原始的 API 模块函数
               const result = module.default(req, res);
-              // 如果模块是异步的，等待它完成
-              if (result instanceof Promise) {
-                await result;
-              }
-              
-              // 确保对象被序列化为 JSON 字符串
+              if (result instanceof Promise) { await result; }
               if (typeof responseBody === 'object' && responseBody !== null) {
                   responseBody = JSON.stringify(responseBody);
               }
-
-              // 4. 将捕获的结果转换为标准的 Worker Response 对象
-              return new Response(responseBody, {
-                  status: responseStatus,
-                  headers: responseHeaders,
-              });
+              return new Response(responseBody, { status: responseStatus, headers: responseHeaders });
           }
 
-          // 遍历所有 API 模块，为它们创建路由
-          for (const path in modules) {
-              const module = (modules as any)[path];
-              if (module.default) {
-                  // 将文件名转换为路由路径，例如 `login_cellphone.js` -> `/login/cellphone`
-                  const routePath = '/' + path.split('/').pop()?.replace('.js', '').replace(/_/g, '/');
-                  // 监听所有 HTTP 方法，因为 API 可能是 GET 或 POST
-                  app.on(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], routePath, (c) => expressAdapter(module, c));
-              }
-          }
+          // --- 动态路由生成开始 ---
+          EOF
 
-          // 添加一个根路由作为健康检查
+          # 2. 使用 shell 循环动态生成 import 和路由注册
+          for file in module/*.js; do
+            # 从文件名 'module/login_cellphone.js' 中提取 'login_cellphone'
+            filename=$(basename "$file" .js)
+            # 创建一个合法的 JS 变量名，如 'module_login_cellphone'
+            identifier="module_${filename}"
+            # 创建路由路径，如 '/login/cellphone'
+            routePath="/${filename//_//}"
+
+            # 追加 import 语句到 src/index.ts
+            echo "import ${identifier} from '../${file}';" >> src/index.ts
+            # 追加路由注册语句到 src/index.ts
+            echo "app.on(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'], '${routePath}', (c) => expressAdapter(${identifier}.default, c));" >> src/index.ts
+          done
+
+          # 3. 写入文件的静态下半部分
+          cat >> src/index.ts << 'EOF'
+          // --- 动态路由生成结束 ---
+
+          // 添加根路由作为健康检查
           app.get('/', (c) => c.text('NeteaseCloudMusicApi is running on Cloudflare Workers!'));
           
           // 导出 Hono app
-          export default app;
+          export default {
+            fetch: app.fetch,
+          };
           EOF
 
           # 写入 wrangler.toml 配置文件
           cat > wrangler.toml << EOF
           name = "${{ secrets.WORKER_NAME }}"
           main = "src/index.ts"
-          compatibility_date = "2024-02-28" # 使用一个较新的日期
-          # nodejs_compat 标志至关重要，它为 Worker 环境提供了部分 Node.js API 的兼容性
+          compatibility_date = "2024-02-28"
           compatibility_flags = ["nodejs_compat"]
           EOF
 
-      # 步骤 5 (可选但推荐): 打印最终文件结构和配置，方便调试
       - name: Display final file structure and config
         run: |
-          echo "--- File structure ---"
-          ls -R
+          echo "--- Generated src/index.ts ---"
+          cat src/index.ts
           echo "--- wrangler.toml content ---"
           cat wrangler.toml
-          echo "-------------------------"
+          echo "------------------------------"
 
-      # 步骤 6: 部署到 Cloudflare Workers
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # wrangler-action 会自动读取 wrangler.toml 文件来执行部署
